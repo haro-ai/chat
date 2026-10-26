@@ -12,6 +12,10 @@
 const CACHE = "haro-chat-v1";
 
 self.addEventListener("install", (event) => {
+  // Replace any active worker immediately: the cache is a disposable mirror
+  // (server is source of truth), so a mixed-version tab is harmless — while
+  // a stuck old shell is not (that's how v0 deploys stopped propagating).
+  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(["/", "/manifest.webmanifest"])),
   );
