@@ -1,0 +1,23 @@
+{
+  "name": "haro-chat",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Phone-first chat app for pi-powered helpers on the tailnet (see PRD.md / ARCHITECTURE.md)",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @haro/app --filter @haro/server dev",
+    "dev:app": "pnpm --filter @haro/app dev",
+    "dev:server": "pnpm --filter @haro/server dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "clean": "pnpm -r clean"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
