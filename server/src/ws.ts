@@ -34,15 +34,15 @@ export function startServer(config: Config): WebSocketServer {
 
     ws.on("close", () => {
       console.log(`[ws] connection closed (conv ${conv})`);
-      // WS drops don't destroy scratch mid-run (ARCH §2.3): the idle timer
-      // owns the cleanup, giving best-effort finish headroom.
+      // WS drops don't destroy the pi child mid-run (ARCH §2.3): the idle timer
+      // owns the recycle, giving best-effort finish headroom.
     });
   });
 
   wss.on("listening", () => {
     console.log(
       `haro chat service listening on ${config.host}:${config.port} ` +
-        `(scratch: ${config.scratchRoot}, pi: ${config.piBin})`,
+        `(cwd: ${config.cwd}, pi: ${config.piBin})`,
     );
     console.log("publish with: tailscale serve --bg --ws 80 http://127.0.0.1:" + config.port);
   });
@@ -51,7 +51,7 @@ export function startServer(config: Config): WebSocketServer {
   process.on("SIGINT", shutdown);
 
   async function shutdown() {
-    console.log("[service] shutting down; disposing conversations (scratch deleted)");
+    console.log("[service] shutting down; disposing conversations");
     await registry.disposeAll();
     wss.close();
     process.exit(0);

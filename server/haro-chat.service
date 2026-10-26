@@ -25,7 +25,7 @@ WorkingDirectory=/home/haro/Code/haro-chat
 # <<< adjust: include node/pnpm on PATH if installed via mise/homebrew
 #Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/haro/.local/share/mise/shims"
 ExecStart=/home/haro/Code/haro-chat/server/run.sh
-# Runtime config (port, scratch root, idle) — cp server/.env.example server/.env
+# Runtime config (port, cwd, idle) — cp server/.env.example server/.env
 EnvironmentFile=-/home/haro/Code/haro-chat/server/.env
 Restart=on-failure
 RestartSec=2

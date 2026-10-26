@@ -1,23 +1,24 @@
-import { Dexie, type Table } from "dexie";
+import Dexie, { type Table } from "dexie";
 
 /**
- * Client-owned data (ARCH §4) — the ONLY durable copy of chats.
- * - `sessions`: per-conversation metadata + the pi session JSONL mirror.
- *   Full portable-session plumbing (snapshot/delta handoff to haro) is v0.2;
- *   v0.1 keeps the shallow mirror in `messages`.
- * - v0.3 adds at-rest encryption (AES-256-GCM) + `navigator.storage.persist()`.
+ * Client cache (hybrid model — ARCH §3): haro's pi session store is the
+ * system of record; this IndexedDB mirror makes history instant on open and
+ * readable offline. It is rebuilt from the server (`get_messages` full
+ * replace) whenever a conversation opens or a run settles — never treated as
+ * authoritative. The composer is disabled while disconnected; the cache is
+ * read-only by definition.
  */
-export interface SessionRow {
+export interface ConversationRow {
   key?: number;
   connId: string;
   convId: string;
+  /** pi session file on the agent host this conversation is bound to */
+  sessionPath: string | null;
   title: string | null;
   updatedAt: number;
-  /** pi session JSONL lines (append-only past the last exchanged entry id) */
-  lines: string[];
 }
 
-/** Shallow v0.1 mirror: one bubble per rendered message. */
+/** One rendered bubble of the cached mirror. */
 export interface MessageRow {
   key?: number;
   convId: string;
@@ -28,13 +29,15 @@ export interface MessageRow {
 }
 
 export class HaroChatDB extends Dexie {
-  sessions!: Table<SessionRow, number>;
+  conversations!: Table<ConversationRow, number>;
   messages!: Table<MessageRow, number>;
 
   constructor() {
     super("haro-chat");
-    this.version(1).stores({
-      sessions: "++key, [connId+convId], connId, updatedAt",
+    // v2: server-authoritative cache. The old client-owned `sessions` store
+    // (Model B) is dropped — the cache is disposable and rebuilt on open.
+    this.version(2).stores({
+      conversations: "++key, connId, updatedAt, sessionPath",
       messages: "++key, [convId+seq], convId",
     });
   }
@@ -42,62 +45,86 @@ export class HaroChatDB extends Dexie {
 
 export const db = new HaroChatDB();
 
-export async function listConversations(connId: string): Promise<SessionRow[]> {
-  const rows = await db.sessions.where("connId").equals(connId).sortBy("updatedAt");
+export async function listConversations(connId: string): Promise<ConversationRow[]> {
+  const rows = await db.conversations.where("connId").equals(connId).sortBy("updatedAt");
   return rows.reverse();
 }
 
-export async function createConversation(
+/** Open (or create) a conversation bound to a pi session file (null = new). */
+export async function openConversation(
   connId: string,
   convId: string,
-): Promise<SessionRow> {
-  const row: SessionRow = {
+  sessionPath: string | null,
+  title?: string | null,
+): Promise<ConversationRow> {
+  const existing = await db.conversations
+    .where("connId")
+    .equals(connId)
+    .and((r) => r.convId === convId)
+    .first();
+  if (existing) {
+    await db.conversations.update(existing.key!, {
+      sessionPath,
+      updatedAt: Date.now(),
+      ...(title !== undefined ? { title: title ?? existing.title } : {}),
+    });
+    return { ...existing, sessionPath, title: title ?? existing.title };
+  }
+  const row: ConversationRow = {
     connId,
     convId,
-    title: null,
+    sessionPath,
+    title: title ?? null,
     updatedAt: Date.now(),
-    lines: [],
   };
-  await db.sessions.add(row);
+  await db.conversations.add(row);
   return row;
 }
 
-export async function deleteConversation(
+/** Reuse the cache row already bound to a session file, if any. */
+export async function findConversationBySession(
   connId: string,
+  sessionPath: string,
+): Promise<ConversationRow | undefined> {
+  return db.conversations
+    .where("connId")
+    .equals(connId)
+    .and((r) => r.sessionPath === sessionPath)
+    .first();
+}
+
+export async function setConversationMeta(
   convId: string,
+  meta: { sessionPath?: string | null; title?: string | null },
 ): Promise<void> {
-  await db.transaction("rw", db.sessions, db.messages, async () => {
-    const session = await db.sessions
-      .where("[connId+convId]")
-      .equals([connId, convId])
-      .first();
-    if (session?.key !== undefined) await db.sessions.delete(session.key);
+  const row = await db.conversations.where("convId").equals(convId).first();
+  if (row) await db.conversations.update(row.key!, { ...meta, updatedAt: Date.now() });
+}
+
+export async function deleteConversation(convId: string): Promise<void> {
+  await db.transaction("rw", db.conversations, db.messages, async () => {
+    const row = await db.conversations.where("convId").equals(convId).first();
+    if (row?.key !== undefined) await db.conversations.delete(row.key);
     const msgs = await db.messages.where("convId").equals(convId).toArray();
     for (const m of msgs) if (m.key !== undefined) await db.messages.delete(m.key);
   });
-}
-
-export async function touchConversation(connId: string, convId: string): Promise<void> {
-  const session = await db.sessions
-    .where("[connId+convId]")
-    .equals([connId, convId])
-    .first();
-  if (session?.key !== undefined) {
-    await db.sessions.update(session.key, { updatedAt: Date.now() });
-  }
 }
 
 export async function listMessages(convId: string): Promise<MessageRow[]> {
   return db.messages.where("convId").equals(convId).sortBy("seq");
 }
 
-export async function addMessage(
-  row: Omit<MessageRow, "key" | "seq">,
+/** Full replace — the cache never merges; the server is the source of truth. */
+export async function replaceMessages(
+  convId: string,
+  msgs: { role: MessageRow["role"]; text: string }[],
 ): Promise<void> {
-  const seq = await db.messages.where("convId").equals(row.convId).count();
-  await db.messages.add({ ...row, seq });
-}
-
-export async function countMessages(convId: string): Promise<number> {
-  return db.messages.where("convId").equals(convId).count();
+  await db.transaction("rw", db.messages, async () => {
+    await db.messages.where("convId").equals(convId).delete();
+    if (msgs.length > 0) {
+      await db.messages.bulkAdd(
+        msgs.map((m, seq) => ({ convId, seq, ts: Date.now(), ...m })),
+      );
+    }
+  });
 }

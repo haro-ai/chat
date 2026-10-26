@@ -6,8 +6,9 @@ import type { Config } from "./config.js";
 /**
  * One `pi --mode rpc` child for one conversation (ARCH §2.3).
  *
- * - spawned lazily, runs with `--session-dir` pointed at the conversation's
- *   scratch dir so haro's real `~/.pi/agents/sessions/` never gains a copy;
+ * - spawned lazily in the configured cwd (the SSH .bashrc entry point's
+ *   directory), against pi's real session store (Model A — ARCH §3);
+ * - an existing session is resumed by passing its file path as `--session`;
  * - stdin/stdout are a verbatim JSONL pump — this service never interprets
  *   content;
  * - child stderr → service log (connection health only, never content).
@@ -19,7 +20,6 @@ export class PiChild {
 
   constructor(
     private readonly config: Config,
-    private readonly scratchDir: string,
     conv: string,
   ) {
     this.conv = conv;
@@ -29,14 +29,20 @@ export class PiChild {
     return this.child !== null && !this.exited;
   }
 
-  spawn(onRecord: (record: unknown) => void, onExit: (code: number | null) => void) {
+  spawn(
+    onRecord: (record: unknown) => void,
+    onExit: (code: number | null) => void,
+    sessionPath?: string | null,
+  ) {
     if (this.child) return;
-    const { piBin } = this.config;
-    this.child = spawn(
-      piBin,
-      ["--mode", "rpc", "--session-dir", this.scratchDir],
-      { stdio: ["pipe", "pipe", "pipe"], env: process.env },
-    );
+    const { piBin, piArgs, cwd } = this.config;
+    const args = ["--mode", "rpc", ...piArgs];
+    if (sessionPath) args.push("--session", sessionPath);
+    this.child = spawn(piBin, args, {
+      cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+    });
     const c = this.child;
     this.exited = false;
 

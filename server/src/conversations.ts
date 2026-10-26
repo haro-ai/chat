@@ -1,18 +1,21 @@
 import type { WebSocket } from "ws";
 import { PiChild } from "./pi-child.js";
-import { Scratch } from "./scratch.js";
+import { listSessions } from "./sessions.js";
 import type { Config } from "./config.js";
 import { ENVELOPE_VERSION, type Envelope } from "@haro/shared";
 
 /**
- * Per-conversation state: one WS, one lazy pi child, one scratch file.
- * In-memory only — the registry is the "conv→child map" from ARCH §1.
+ * Per-conversation state: one WS, one lazy pi child (Model A — ARCH §3).
+ * In-memory only — the registry is the "conv→child map" from ARCH §1; the
+ * durable conversation lives in pi's session store, keyed by the session file
+ * path the client passes back in `hello`.
  */
 export class Conversation {
   readonly conv: string;
-  readonly scratch: Scratch;
   readonly child: PiChild;
   lastActivity = Date.now();
+  /** Session file to resume on the next child spawn (from ctl hello). */
+  private sessionPath: string | null = null;
 
   private idleTimer: NodeJS.Timeout | null = null;
   private outSeq = 0;
@@ -22,8 +25,7 @@ export class Conversation {
   private ws: WebSocket | null = null;
 
   /** Bind the conversation's client socket. Reconnects rebind here; the pi
-   *  child and scratch outlive any single WS (ARCH §2.3: WS drops don't
-   *  destroy scratch mid-run). */
+   *  child outlives any single WS (ARCH §2.3). */
   attach(ws: WebSocket): void {
     this.ws = ws;
     this.touch();
@@ -35,8 +37,7 @@ export class Conversation {
     conv: string,
   ) {
     this.conv = conv;
-    this.scratch = new Scratch(config, conv);
-    this.child = new PiChild(config, this.scratch.dir, conv);
+    this.child = new PiChild(config, conv);
   }
 
   /** Any activity (WS message, pi stdout) resets the idle countdown. */
@@ -52,27 +53,16 @@ export class Conversation {
 
     switch (ctl) {
       case "hello": {
+        const { sessionPath } = payload as { sessionPath?: string | null };
+        this.sessionPath = typeof sessionPath === "string" && sessionPath ? sessionPath : null;
         await this.ensureChild();
         break;
       }
-      case "snapshot": {
-        const { lines } = payload as { lines?: string[] };
-        await this.scratch.writeSnapshot(lines ?? []);
-        await this.ensureChild();
+      case "list_sessions": {
+        const sessions = await listSessions(this.config.sessionsDir);
+        this.sendCtl({ ctl: "sessions", sessions });
         break;
       }
-      case "delta": {
-        const { lines } = payload as { lines?: string[] };
-        await this.scratch.appendDelta(lines ?? []);
-        await this.ensureChild();
-        break;
-      }
-      case "presence": {
-        // active/inactive hint from the client; the idle timer is the source
-        // of truth server-side (v0.2 reconciles via get_messages).
-        break;
-      }
-      // idle_ack is service → client only.
     }
   }
 
@@ -80,10 +70,10 @@ export class Conversation {
     if (this.child.running || this.spawning) return;
     this.spawning = true;
     try {
-      await this.scratch.ensureDir();
       this.child.spawn(
         (record) => this.sendPiOut(record),
         (code) => console.error(`[conv ${this.conv}] pi child exited (code ${code})`),
+        this.sessionPath,
       );
     } finally {
       this.spawning = false;
@@ -106,6 +96,16 @@ export class Conversation {
 
   /** pi → client: wrap a record in a `kind:"pi"` envelope. */
   private sendPiOut(payload: unknown): void {
+    this.sendEnvelope("pi", payload);
+    this.touch();
+  }
+
+  /** Service → client control message (session listings). */
+  sendCtl(payload: unknown): void {
+    this.sendEnvelope("ctl", payload);
+  }
+
+  private sendEnvelope(kind: "pi" | "ctl", payload: unknown): void {
     const ws = this.ws;
     if (!ws || ws.readyState !== ws.OPEN) return;
     this.outSeq += 1;
@@ -113,18 +113,18 @@ export class Conversation {
       v: ENVELOPE_VERSION,
       conv: this.conv,
       seq: this.outSeq,
-      kind: "pi",
+      kind,
       payload,
     };
     ws.send(JSON.stringify(env));
-    this.touch();
   }
 
   async dispose(): Promise<void> {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    // The session file lives in pi's store (Model A) — stopping the child
+    // ends the conversation's residency; nothing else to clean up.
     this.child.stop();
-    await this.scratch.destroy();
     this.onDispose(this.conv);
   }
 }

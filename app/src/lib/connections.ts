@@ -1,7 +1,10 @@
 /**
  * Connections ("servers") — user data in localStorage (R3, ARCH §4).
  * Small, sync, instant restore. Each connection is independent: own WS,
- * own conversations, own history.
+ * own conversations. Under the hybrid model the durable identity of a
+ * conversation is pi's session file on the agent host — the client remembers
+ * only the last one it had open, so reopening the app resumes where you
+ * left off.
  */
 export interface Connection {
   id: string;
@@ -9,7 +12,8 @@ export interface Connection {
   /** wss:// base URL of the agent host's chat service */
   url: string;
   dateAdded: number;
-  lastConvId: string | null;
+  /** pi session file on the agent host of the last-open conversation */
+  lastSessionPath: string | null;
   prefs: Record<string, unknown>;
 }
 
@@ -26,7 +30,7 @@ const DEFAULT_WS_URL =
 export const DEFAULT_CONNECTION: Omit<Connection, "id" | "dateAdded"> = {
   name: "haro",
   url: DEFAULT_WS_URL,
-  lastConvId: null,
+  lastSessionPath: null,
   prefs: {},
 };
 
@@ -61,7 +65,7 @@ export function addConnection(name: string, url: string): Connection {
     name,
     url,
     dateAdded: Date.now(),
-    lastConvId: null,
+    lastSessionPath: null,
     prefs: {},
   };
   saveConnections([...connections, c]);
@@ -72,8 +76,10 @@ export function removeConnection(id: string): void {
   saveConnections(loadConnections().filter((c) => c.id !== id));
 }
 
-export function setLastConvId(id: string, convId: string | null): void {
+export function setLastSessionPath(id: string, sessionPath: string | null): void {
   saveConnections(
-    loadConnections().map((c) => (c.id === id ? { ...c, lastConvId: convId } : c)),
+    loadConnections().map((c) =>
+      c.id === id ? { ...c, lastSessionPath: sessionPath } : c,
+    ),
   );
 }

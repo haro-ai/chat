@@ -6,7 +6,7 @@ Phone-first chat app for **haro** (and, over time, every other pi-powered helper
 cobra (iPhone PWA)  ⇄  dynames (static SPA host)  ·  wss ⇄ haro (Raspberry Pi: chat service + `pi --mode rpc`)
 ```
 
-- **Client-owned history** — conversations live in the browser (localStorage + IndexedDB); the server stores nothing durable.
+- **Server-authoritative sessions, client cache** — pi children run in the same cwd an SSH session lands in, against pi's real session store: resume any conversation — started here or over SSH — from anywhere on the tailnet. The browser keeps an offline cache that re-syncs whenever a conversation opens; sending is online-only.
 - **pi RPC over WS** — the SPA speaks pi's RPC protocol directly; the chat service is a dumb pump. No bespoke chat API.
 - **Tailnet-only** — everything is published via `tailscale serve`; nothing touches the public internet.
 
@@ -14,8 +14,8 @@ cobra (iPhone PWA)  ⇄  dynames (static SPA host)  ·  wss ⇄ haro (Raspberry 
 
 | Path | What | Runs on |
 |---|---|---|
-| `app/` | React + Vite SPA (PWA): connections (localStorage), conversation list, chat UI, client-owned history (Dexie/IndexedDB), envelope WS client | cobra (served from dynames) |
-| `server/` | Chat service: WS per conversation, conv→child map, `pi --mode rpc` children, transient scratch files (deleted on idle) | haro |
+| `app/` | React + Vite SPA (PWA): connections (localStorage), conversation list + past-session picker, chat UI, offline cache (Dexie/IndexedDB, synced on open), envelope WS client | cobra (served from dynames) |
+| `server/` | Chat service: WS per conversation, conv→child map, `pi --mode rpc` children in the user's home dir, past-session listing from pi's session store | haro |
 | `shared/` | Envelope protocol + minimal pi RPC types — the contract both sides speak | — |
 
 ## Dev
@@ -38,6 +38,6 @@ native systemd unit for the chat service (haro), both behind
 
 ## Status
 
-v0.1 scaffold ("It lives" — PRD §4): envelope protocol, WS service with per-conversation pi children + scratch lifecycle, minimal SPA with streaming renderer and shallow IndexedDB mirror, PWA shell. Portable sessions (Model B snapshot/delta), at-rest crypto, and recovery export land in v0.2/v0.3.
+v0.2 (hybrid model, ARCH §3): server-authoritative pi sessions (Model A) with SSH↔phone resume, past-session picker, sync-on-open/settle client cache, online-only composer. At-rest cache crypto and recovery export land in v0.3.
 
 Icons in `app/public/icons/` are solid-color placeholders — replace before shipping the Home Screen install.

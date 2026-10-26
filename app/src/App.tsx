@@ -1,58 +1,120 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AGENT_SETTLED } from "@haro/shared";
-import { uuid } from "@haro/shared";
-import { loadConnections, setLastConvId, type Connection } from "./lib/connections";
+import { AGENT_SETTLED, uuid, type SessionInfo } from "@haro/shared";
+import { loadConnections, setLastSessionPath, type Connection } from "./lib/connections";
 import {
-  addMessage,
-  createConversation,
+  findConversationBySession,
   listConversations,
   listMessages,
-  touchConversation,
+  openConversation,
+  replaceMessages,
+  setConversationMeta,
   deleteConversation,
+  type ConversationRow,
   type MessageRow,
-  type SessionRow,
 } from "./lib/db";
+import { toChatMessages } from "./lib/chat";
 import { RpcClient, type ConnStatus } from "./lib/rpc-client";
 import { ChatView } from "./components/ChatView";
 import { ConversationList } from "./components/ConversationList";
 
 /**
- * v0.1 minimal SPA (PRD §4): one hardcoded connection (haro), a conversation
- * list, composer + streaming renderer, shallow client-side mirror in
- * IndexedDB. Refresh keeps history; the server keeps nothing (R5).
+ * Hybrid-model SPA (ARCH §3): haro's pi session store is the system of
+ * record; this client keeps an offline cache (IndexedDB) that is re-synced
+ * from the server whenever a conversation opens (get_messages full replace)
+ * and after each run settles. The composer is enabled only while connected —
+ * cached history is read-only by definition.
  */
 export default function App() {
   const [connection] = useState<Connection>(() => loadConnections()[0]);
-  const [conversations, setConversations] = useState<SessionRow[]>([]);
-  const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationRow[]>([]);
+  const [active, setActive] = useState<ConversationRow | null>(null);
   const [messages, setMessages] = useState<MessageRow[]>([]);
+  /** optimistic user bubble for the in-flight prompt (never persisted) */
+  const [optimistic, setOptimistic] = useState<MessageRow | null>(null);
   const [streaming, setStreaming] = useState("");
   const [status, setStatus] = useState<ConnStatus>("idle");
+  /** past sessions on the agent host (Model A listing), null = not fetched */
+  const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
 
   const rpcRef = useRef<RpcClient | null>(null);
+  const activeRef = useRef<ConversationRow | null>(null);
   const streamingRef = useRef("");
+  const messagesRef = useRef<MessageRow[]>([]);
+
+  activeRef.current = active;
+  messagesRef.current = messages;
 
   const refreshConversations = useCallback(async () => {
     if (!connection) return;
     setConversations(await listConversations(connection.id));
   }, [connection]);
 
-  // Boot: conversation list for the (single, hardcoded) connection.
+  // Boot: cached conversation list (instant, works offline).
   useEffect(() => {
-    void (async () => {
-      await refreshConversations();
-    })();
+    void refreshConversations();
   }, [refreshConversations]);
 
-  // Wire one WS per active conversation + iOS resilience hooks (R6).
+  /** Sync-on-open/settle: full get_messages replace + get_state adoption. */
+  const syncActive = useCallback(async () => {
+    const rpc = rpcRef.current;
+    const conv = activeRef.current;
+    if (!rpc || !conv || !connection) return;
+    try {
+      const [msgsRes, stateRes] = await Promise.all([
+        rpc.request({ type: "get_messages" }),
+        rpc.request({ type: "get_state" }),
+      ]);
+      if (!msgsRes.success) throw new Error(String(msgsRes.error ?? "get_messages failed"));
+      const bubbles = toChatMessages(
+        ((msgsRes.data as { messages?: unknown[] })?.messages ?? []) as never[],
+      );
+      await replaceMessages(conv.convId, bubbles);
+      setMessages(await listMessages(conv.convId));
+      setOptimistic(null);
+      // Adopt the session identity pi created (new conversations only —
+      // resumed ones already have their path).
+      const st = (stateRes.data ?? {}) as {
+        sessionFile?: string;
+        sessionName?: string;
+      };
+      const meta: { sessionPath?: string | null; title?: string | null } = {};
+      if (st.sessionFile) meta.sessionPath = st.sessionFile;
+      if (st.sessionName) {
+        meta.title = st.sessionName;
+      } else if (!conv.title) {
+        const firstUser = bubbles.find((b) => b.role === "user");
+        if (firstUser) meta.title = firstUser.text.slice(0, 48);
+      }
+      if (meta.sessionPath || meta.title !== undefined) {
+        await setConversationMeta(conv.convId, meta);
+        if (meta.sessionPath) setLastSessionPath(connection.id, meta.sessionPath);
+        void refreshConversations();
+      }
+    } catch (err) {
+      // Sync is best-effort; callers decide the fallback. The cache stays
+      // as-is and the offline UI remains read-only.
+      console.error("[sync] failed:", err);
+      throw err;
+    }
+  }, [connection, refreshConversations]);
+
+  // One WS per active conversation + iOS resilience hooks.
   useEffect(() => {
-    if (!connection || !activeConvId) return;
+    if (!connection || !active) return;
 
     const rpc = new RpcClient({
       baseUrl: connection.url,
-      convId: activeConvId,
+      convId: active.convId,
+      sessionPath: active.sessionPath,
       onRecord: (record) => void handleRecord(record),
-      onStatus: setStatus,
+      onCtl: (ctl) => {
+        if (ctl.ctl === "sessions") setSessions(ctl.sessions);
+      },
+      onStatus: (s) => {
+        setStatus(s);
+        // Sync-on-open: reconcile the cache with the server's session store.
+        if (s === "open") syncActive().catch(() => {});
+      },
     });
     rpcRef.current = rpc;
     rpc.connect();
@@ -70,22 +132,24 @@ export default function App() {
       rpcRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection, activeConvId]);
+  }, [connection, active?.convId, active?.sessionPath]);
 
-  // Load the message mirror when switching conversations.
+  // Load the cached mirror when switching conversations.
   useEffect(() => {
-    if (!activeConvId) {
+    if (!active) {
       setMessages([]);
       return;
     }
-    void listMessages(activeConvId).then(setMessages);
-  }, [activeConvId]);
+    void listMessages(active.convId).then(setMessages);
+  }, [active]);
 
   async function handleRecord(record: unknown) {
     const r = record as {
       type?: string;
+      id?: string;
       success?: boolean;
       error?: unknown;
+      command?: string;
       assistantMessageEvent?: { type?: string; delta?: string };
     };
     if (r?.type === "message_update") {
@@ -97,77 +161,116 @@ export default function App() {
       return;
     }
     if (r?.type === AGENT_SETTLED) {
+      // The run ended: the session store now holds the truth — sync instead
+      // of committing streaming text. Falls back to the streamed text if the
+      // sync can't reach the server.
       const text = streamingRef.current;
       streamingRef.current = "";
-      setStreaming("");
-      if (text && activeConvId) {
-        await addMessage({
-          convId: activeConvId,
-          role: "assistant",
-          text,
-          ts: Date.now(),
-        });
-        setMessages(await listMessages(activeConvId));
+      try {
+        await syncActive();
+      } catch {
+        if (text && activeRef.current) {
+          await replaceMessages(activeRef.current.convId, [
+            ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
+            { role: "assistant" as const, text },
+          ]);
+          setMessages(await listMessages(activeRef.current.convId));
+        }
       }
+      setStreaming("");
       return;
     }
-    // Failed command = single response record; runtime failures surface in
-    // the event stream → render as system bubbles (never silence errors).
-    if (r?.type === "response" && r.success === false && activeConvId) {
-      await addMessage({
-        convId: activeConvId,
-        role: "system",
-        text: `Error: ${JSON.stringify(r.error ?? "command failed")}`,
-        ts: Date.now(),
-      });
-      setMessages(await listMessages(activeConvId));
+    // Prompt accepted/queued/handled → the user message is now (or will be)
+    // in the session store; a sync picks it up and clears the optimistic one.
+    if (r?.type === "response" && r.command === "prompt" && r.success) {
+      syncActive().catch(() => {});
+      return;
+    }
+    if (r?.type === "response" && r.success === false && activeRef.current) {
+      await replaceMessages(activeRef.current.convId, [
+        ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
+        { role: "system" as const, text: `Error: ${JSON.stringify(r.error ?? "command failed")}` },
+      ]);
+      setMessages(await listMessages(activeRef.current.convId));
     }
   }
 
   async function newConversation() {
     if (!connection) return;
-    const conv = await createConversation(connection.id, uuid());
-    await refreshConversations();
-    setActiveConvId(conv.convId);
-    setLastConvId(connection.id, conv.convId);
+    const row = await openConversation(connection.id, uuid(), null);
+    setActive(row);
     setStreaming("");
+    void refreshConversations();
+  }
+
+  /** Open a past session from the agent host's store (resume). */
+  async function openSession(info: SessionInfo) {
+    if (!connection) return;
+    // Reuse the cache row already bound to this session, if we have one.
+    const existing = await findConversationBySession(connection.id, info.path);
+    const row = existing ?? {
+      connId: connection.id,
+      convId: uuid(),
+      sessionPath: info.path,
+      title: info.name ?? `Session ${info.id.slice(0, 8)}`,
+      updatedAt: Date.now(),
+    };
+    const saved = await openConversation(
+      connection.id,
+      row.convId,
+      info.path,
+      info.name ?? `Session ${info.id.slice(0, 8)}`,
+    );
+    setActive(saved);
+    setStreaming("");
+    void refreshConversations();
+  }
+
+  function requestSessions() {
+    setSessions(null); // loading
+    rpcRef.current?.sendCtl({ ctl: "list_sessions" });
   }
 
   async function send(text: string) {
-    if (!connection || !activeConvId) return;
-    await addMessage({
-      convId: activeConvId,
+    if (!connection || !active || status !== "open") return;
+    // Optimistic user bubble — the session store becomes authoritative on
+    // the next sync (prompt-response or agent_settled).
+    setOptimistic({
+      convId: active.convId,
+      seq: messages.length,
       role: "user",
       text,
       ts: Date.now(),
     });
-    setMessages(await listMessages(activeConvId));
-    await touchConversation(connection.id, activeConvId);
-    rpcRef.current?.sendPi({
-      id: uuid(),
-      type: "prompt",
-      message: text,
-    });
+    rpcRef.current?.sendPi({ id: uuid(), type: "prompt", message: text });
   }
 
   if (!connection) return null;
 
-  const active = conversations.find((c) => c.convId === activeConvId) ?? null;
+  const shown = optimistic ? [...messages, optimistic] : messages;
 
   return (
     <div className="flex h-full">
       <ConversationList
         serverName={connection.name}
         conversations={conversations}
-        activeConvId={activeConvId}
-        onSelect={setActiveConvId}
+        activeConvId={active?.convId ?? null}
+        onSelect={async (convId) => {
+          const row = conversations.find((c) => c.convId === convId);
+          if (row) setActive(row);
+        }}
         onNew={() => void newConversation()}
+        sessions={sessions}
+        onBrowseSessions={requestSessions}
+        onSelectSession={(info) => void openSession(info)}
+        onCloseSessions={() => setSessions(null)}
       />
       <div className="flex-1">
         <ChatView
           title={active?.title ?? null}
           status={status}
-          messages={messages}
+          connected={status === "open"}
+          messages={shown}
           streaming={streaming}
           onSend={(t) => void send(t)}
         />

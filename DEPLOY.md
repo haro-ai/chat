@@ -51,7 +51,7 @@ git clone https://github.com/haro-ai/chat.git ~/Code/haro-chat
 cd ~/Code/haro-chat
 pnpm install --frozen-lockfile
 
-cp server/.env.example server/.env   # then edit: port, scratch root, idle
+cp server/.env.example server/.env   # then edit: port, cwd, idle
 sudo cp server/haro-chat.service /etc/systemd/system/
 # edit the unit: User=, WorkingDirectory, PATH line for the pi user
 sudo systemctl daemon-reload && sudo systemctl enable --now haro-chat
@@ -67,7 +67,7 @@ Sanity checks:
 
 ```sh
 systemctl status haro-chat        # journal shows "listening on 127.0.0.1:8787"
-ls /tmp/haro-chat-scratch/        # conv dirs appear mid-run, empty after idle
+ls ~/.pi/agent/sessions/          # new phone sessions land here, next to SSH/TUI ones
 tailscale serve status
 ```
 
@@ -77,8 +77,10 @@ tailscale serve status
 |---|---|---|
 | `HARO_HOST`/`HARO_PORT` | `127.0.0.1:8787` | loopback bind — `tailscale serve` fronts it |
 | `HARO_PI_BIN` | `pi` | resolved on the service PATH; must be **haro's** pi |
-| `HARO_SCRATCH_ROOT` | `/tmp/haro-chat-scratch` | transient snapshot dir — deleted on idle (R5) |
-| `HARO_IDLE_TIMEOUT_MS` | `600000` | idle window before child+scratch recycle |
+| `HARO_CWD` | `$HOME` | working directory pi children run in — the same dir the SSH `.bashrc` entry point drops into (ARCH §3) |
+| `HARO_SESSIONS_DIR` | `~/.pi/agent/sessions` | pi's session store, scanned for the past-session listing |
+| `HARO_PI_ARGS` | `--approve` | extra args for every pi child; `--approve` trusts the working folder (children are non-interactive and would deadlock on the TUI trust prompt) |
+| `HARO_IDLE_TIMEOUT_MS` | `600000` | idle window before a conversation's pi child is recycled |
 | `HARO_MAX_CHILDREN` | `4` | simultaneous pi children (LRU beyond) |
 
 ## Then, on cobra
@@ -96,5 +98,6 @@ docker compose down && sudo tailscale serve --off
 # haro
 sudo systemctl disable --now haro-chat && sudo tailscale serve --off
 sudo rm /etc/systemd/system/haro-chat.service
-# scratch is already gone (idle sweep); nothing durable is stored anywhere.
+# sessions persist in pi's store (~/.pi/agent/sessions) — the system of record.
+# Removing the service leaves them; TUI/SSH sessions keep working unchanged.
 ```

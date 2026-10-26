@@ -12,7 +12,7 @@ Kivlor's helper **haro** runs on a Raspberry Pi in the tailnet, powered by [pi](
 
 - The SPA is served statically from **dynames** (Docker host) and installed by the user onto their iPhone (**cobra**) as a Home Screen app.
 - The SPA holds a list of **"servers"** (agent hosts). The first is **haro**, exposed by a small chat service on the pi; any host can be added later by pasting its URL.
-- **All chat history lives on the clients.** dynames stores nothing; haro's service stores nothing durable. No cloud, no third-party relay — everything stays on the tailnet.
+- **Chat history lives in pi's session store on the agent host** (the same place SSH/TUI sessions land), with a synced cache in the client browser for instant open and offline reading. dynames stores nothing; the haro service itself stores nothing — the session store is pi's. No cloud, no third-party relay — everything stays on the tailnet.
 
 **North star:** talking to haro from the phone should feel as natural as running `pi` at a terminal on the pi — same agent identity, same capabilities, zero distance.
 
@@ -71,25 +71,26 @@ Today: one user (Kivlor), own everything, all on one tailnet. iOS Safari is the 
 | dynames serving | Static file host behind `tailscale serve`; zero logs of content |
 | **Success gate** | A message round-trips cobra → dynames-served SPA → haro → pi → back, streamed; refresh preserves history (client mirror); dynames logs show no content |
 
-### v0.2 — "Portable sessions & resilience"
+### v0.2 — "Server-authoritative sessions & resilience"
 
-**Outcome:** history is genuinely client-owned (system of record), and the app survives network hits.
+**Outcome:** pi's session store on haro is the system of record (Model A, ARCH §3); SSH/TUI sessions are resumable from the phone and vice versa; the app survives network hits.
 
 | Deliverable | Detail |
 |---|---|
-| Portable session plumbing | Client stores conversations as [pi-format session JSONL in IndexedDB](ARCHITECTURE.md#3-data-ownership-model-the-critical-design-decision), keyed by client-generated convIds; hands the snapshot (or delta) to haro each turn; receives and stores deltas back |
-| Scratch lifecycle on haro | Snapshot written to temp dir; `--session-dir` for pi children; **scratch files deleted on idle** — nothing durable on haro |
+| Model A session plumbing | pi children spawn in the SSH entry point's cwd against pi's real session store; resume by session-file path (`hello.sessionPath` → `--session <path>`); session identity adopted from `get_state.sessionFile` |
+| Past-session picker | Service scans pi's session store (headers + newest `session_info` name only — never content); phone lists and resumes any session, including ones started over SSH |
+| Client cache (hybrid) | IndexedDB mirror, fully replaced by `get_messages` on open and after each run; offline = read-only history, composer enabled only while connected |
 | Multi-conversation | List, create, switch, rename, delete (with confirm) per connection |
-| Resilience | Auto-reconnect on iOS visibility/foreground/online; per-connection outbox queue; `get_messages`-based reconciliation if the socket drops mid-run |
-| **Success gate** | Background the phone mid-reply → resume → reply completes and record appends; kill the WS → reconnect recovers; haro's temp dir empties after idle; `~/.pi/agents/sessions/` never gains these conversations |
+| Resilience | Auto-reconnect on iOS visibility/foreground/online; per-connection outbox queue; sync-on-reconnect reconciliation if the socket drops mid-run |
+| **Success gate** | Start a session over SSH in `~` → it appears in the phone's "Resume a past session" picker → resume and continue → run `pi --continue` over SSH and the phone's messages are there. Background the phone mid-reply → resume → reply completes and cache re-syncs; kill the WS → reconnect recovers |
 
 ### v0.3 — "Client hardening"
 
-**Outcome:** the stored history on phones is encrypted, persistent, and recoverable — safe as the system of record.
+**Outcome:** the cached history on phones is encrypted, persistent, and recoverable. (Under Model A the system of record lives on haro, so this is cache hygiene, not durability of record.)
 
 | Deliverable | Detail |
 |---|---|
-| At-rest encryption | Passphrase-derived AES-256-GCM over IndexedDB sessions |
+| At-rest encryption | Passphrase-derived AES-256-GCM over the IndexedDB cache |
 | `persist()` | Nav storage persistence requested on first write; UI shows retention state |
 | Recovery export/import | Full history (all connections) to a file; restore on fresh device/install |
 | Connections UX | Add/remove servers; URL validation; per-connection deletion sweep (warn) |
@@ -133,7 +134,7 @@ See §5. Second agent host (proving generic-server model), web push, voice, off-
 | # | Question | Impacts | Status |
 |---|---|---|---|
 | Q1 | Does the SPA get **connection-level auth** against each server beyond the tailnet (e.g. one-time pairing codes, an `allowlist`, or `Tailscale-User-Login` checks)? | haro service code surface; risk posture | Lean "no" for v0.x (tailnet is the trust boundary, home-lab scale); revisit the moment non-personal devices join |
-| Q2 | How do **long sessions** stay cheap in Model B? | compaction-before-export thresholds; UX when a session ships megabytes over wire | Design in v0.2; measure first with real chats |
+| Q2 | How do **long sessions** stay cheap under sync-on-open (full `get_messages` replace)? | switch to `get_entries` + a `since` cursor when first-paint cost bites; compaction interacts via pi's auto-compact | Open — measure with real sessions first |
 | Q3 | Where do **images/attachments** actually live (client base64 each turn vs. pi temp store on haro)? | R5 strictness, model cost | Deferred to v0.4; must be resolved before attachments ship |
 | Q4 | Is **dynames-hosted SPA caching** (service worker) enough for offline read-only history, or do we cache the haro WS handshake? | offline UX tests on iOS | Prototype in v0.1 |
 | Q5 | What's minimum haro-service **deployment story** on the pi (systemd unit? docker? run script)? | reproducibility, upgrades | Decide at v0.2 close |
@@ -147,12 +148,12 @@ See §5. Second agent host (proving generic-server model), web push, voice, off-
 | Date* | Decision | Rationale | Status |
 |---|---|---|---|
 | D1 | Chat protocol = **pi RPC tunneled over WS** (no bespoke chat API) | Reuse pi's stable, typed protocol; keeps the server blind by construction | ✅ Adopted (ARCH §2) |
-| D2 | **Model B — portable sessions**: client owns history in pi session format on IndexedDB; haro gets transient scratch copies | Satisfies "NOTHING on the chat server" while keeping full TUI fidelity | ✅ Adopted (ARCH §3) |
+| D2 | **Model A — server-authoritative sessions (hybrid)**: pi children run in the SSH entry point's cwd against pi's real session store; the client keeps a disposable IndexedDB cache, fully replaced by `get_messages` on open and after each run; composer disabled while disconnected. Supersedes Model B (client-owned portable sessions) | Makes SSH↔phone resume native — the same session file is live in both places, no import machinery. Trade-off accepted: conversation history persists on haro (pi's own store, hardware you own, tailnet-only) | ✅ Adopted (ARCH §3) |
 | D3 | **All-tailnet transport** — direct connections from cobra to dynames (HTTPS) and haro (WSS), both published via `tailscale serve`; **no relay, no cloud rendezvous** | Every device already on the tailnet incl. cellular; WireGuard + tailnet boundary is the trust model; relay demoted to off-tailnet fallback | ✅ Adopted (ARCH §1) |
-| D4 | Model A (agent-side pi session persistence on haro) **not chosen**, kept as documented fallback | Conflicts with strict client-ownership; revisit only if Model B wire costs bite | 🔌 Fallback (ARCH §3) |
+| D4 | Model B (client-owned portable sessions) implemented in v0.1, then **replaced** by Model A when the resume-from-SSH feature landed | Model B made every SSH/TUI session a foreigner to the chat system; a resume feature under it needed a copy-import shim with two session representations. D4's original trigger (wire costs) never fired; the resume feature did | 🔌 Superseded by D2 |
 | D5 | Model B variant "raw turn-by-turn with transcript re-prompting" **rejected** | Loses tool/thinking fidelity, O(n) token cost | ❌ Rejected (ARCH §3) |
-| D6 | Server (haro service) sees traffic in transit but **stores nothing durable** — stated as design invariant, not cryptographic guarantee | Honest trust framing on hardware you own | ✅ Adopted (ARCH §6) |
-| D7 | Client at-rest **encryption + `persist()`** | The phone is the only durable copy of chats; phone is the lossy surface | ✅ Adopted, v0.3 (ARCH §4) |
+| D6 | The haro **service** persists nothing durable and understands no content; conversation history lives in **pi's** session store, written by pi children exactly as the TUI would. Traffic in transit is visible to the service — stated as design invariant, not cryptographic guarantee | Honest trust framing on hardware you own | ✅ Adopted (ARCH §6) |
+| D7 | Client at-rest **encryption + `persist()`** | The phone holds a synced cache of chats (system of record is on haro); encryption protects the cache, phone is still the lossy surface | ✅ Adopted, v0.3 (ARCH §4) |
 
 \* decision order, not calendar dates.
 
