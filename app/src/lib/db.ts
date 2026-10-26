@@ -1,4 +1,4 @@
-import Dexie, { type Table } from "dexie";
+import { Dexie, type Table } from "dexie";
 
 /**
  * Client-owned data (ARCH §4) — the ONLY durable copy of chats.

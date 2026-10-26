@@ -13,6 +13,8 @@ export interface Connection {
   prefs: Record<string, unknown>;
 }
 
+import { uuid } from "@haro/shared";
+
 const KEY = "haro-chat:connections";
 
 /** First server — haro on the tailnet (hardcoded seed for v0.1, PRD §4). */
@@ -36,7 +38,7 @@ export function loadConnections(): Connection[] {
 function seed(): Connection {
   const c: Connection = {
     ...DEFAULT_CONNECTION,
-    id: crypto.randomUUID(),
+    id: uuid(),
     dateAdded: Date.now(),
   };
   saveConnections([c]);
@@ -50,7 +52,7 @@ export function saveConnections(connections: Connection[]): void {
 export function addConnection(name: string, url: string): Connection {
   const connections = loadConnections();
   const c: Connection = {
-    id: crypto.randomUUID(),
+    id: uuid(),
     name,
     url,
     dateAdded: Date.now(),

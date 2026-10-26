@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AGENT_SETTLED } from "@haro/shared";
+import { uuid } from "@haro/shared";
 import { loadConnections, setLastConvId, type Connection } from "./lib/connections";
 import {
   addMessage,
@@ -125,7 +126,7 @@ export default function App() {
 
   async function newConversation() {
     if (!connection) return;
-    const conv = await createConversation(connection.id, crypto.randomUUID());
+    const conv = await createConversation(connection.id, uuid());
     await refreshConversations();
     setActiveConvId(conv.convId);
     setLastConvId(connection.id, conv.convId);
@@ -143,7 +144,7 @@ export default function App() {
     setMessages(await listMessages(activeConvId));
     await touchConversation(connection.id, activeConvId);
     rpcRef.current?.sendPi({
-      id: crypto.randomUUID(),
+      id: uuid(),
       type: "prompt",
       message: text,
     });

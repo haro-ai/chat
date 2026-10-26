@@ -1,4 +1,4 @@
-import { ENVELOPE_VERSION, isEnvelope, type Ctl, type Envelope } from "@haro/shared";
+import { ENVELOPE_VERSION, isEnvelope, uuid, type Ctl, type Envelope } from "@haro/shared";
 
 export type ConnStatus = "idle" | "connecting" | "open" | "closed";
 
@@ -27,7 +27,7 @@ export class RpcClient {
   private outSeq = 0;
   private lastInSeq = 0;
   private status: ConnStatus = "idle";
-  private readonly clientId = crypto.randomUUID();
+  private readonly clientId = uuid();
 
   constructor(private readonly opts: RpcClientOptions) {}
 
