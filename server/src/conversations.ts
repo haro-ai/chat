@@ -18,6 +18,16 @@ export class Conversation {
   private outSeq = 0;
   private pending: unknown[] = [];
   private spawning = false;
+  /** Current client socket — re-attached on reconnect (child survives it). */
+  private ws: WebSocket | null = null;
+
+  /** Bind the conversation's client socket. Reconnects rebind here; the pi
+   *  child and scratch outlive any single WS (ARCH §2.3: WS drops don't
+   *  destroy scratch mid-run). */
+  attach(ws: WebSocket): void {
+    this.ws = ws;
+    this.touch();
+  }
 
   constructor(
     private readonly config: Config,
@@ -36,25 +46,25 @@ export class Conversation {
     this.idleTimer = setTimeout(() => void this.dispose(), this.config.idleTimeoutMs);
   }
 
-  async handleCtl(payload: unknown, ws: WebSocket): Promise<void> {
+  async handleCtl(payload: unknown): Promise<void> {
     if (typeof payload !== "object" || payload === null) return;
     const ctl = (payload as { ctl?: string }).ctl;
 
     switch (ctl) {
       case "hello": {
-        await this.ensureChild(ws);
+        await this.ensureChild();
         break;
       }
       case "snapshot": {
         const { lines } = payload as { lines?: string[] };
         await this.scratch.writeSnapshot(lines ?? []);
-        await this.ensureChild(ws);
+        await this.ensureChild();
         break;
       }
       case "delta": {
         const { lines } = payload as { lines?: string[] };
         await this.scratch.appendDelta(lines ?? []);
-        await this.ensureChild(ws);
+        await this.ensureChild();
         break;
       }
       case "presence": {
@@ -66,13 +76,13 @@ export class Conversation {
     }
   }
 
-  private async ensureChild(ws: WebSocket): Promise<void> {
+  private async ensureChild(): Promise<void> {
     if (this.child.running || this.spawning) return;
     this.spawning = true;
     try {
       await this.scratch.ensureDir();
       this.child.spawn(
-        (record) => this.sendPiOut(ws, record),
+        (record) => this.sendPiOut(record),
         (code) => console.error(`[conv ${this.conv}] pi child exited (code ${code})`),
       );
     } finally {
@@ -87,16 +97,17 @@ export class Conversation {
   }
 
   /** Client → pi. Queued if the child isn't running yet (spawn is async). */
-  sendPi(ws: WebSocket, payload: unknown): void {
+  sendPi(payload: unknown): void {
     if (!this.child.send(payload)) {
       this.pending.push(payload);
-      void this.ensureChild(ws);
+      void this.ensureChild();
     }
   }
 
   /** pi → client: wrap a record in a `kind:"pi"` envelope. */
-  private sendPiOut(ws: WebSocket, payload: unknown): void {
-    if (ws.readyState !== ws.OPEN) return;
+  private sendPiOut(payload: unknown): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== ws.OPEN) return;
     this.outSeq += 1;
     const env: Envelope = {
       v: ENVELOPE_VERSION,

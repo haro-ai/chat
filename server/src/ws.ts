@@ -22,7 +22,7 @@ export function startServer(config: Config): WebSocketServer {
     }
 
     const c = registry.get(conv);
-    c.touch();
+    c.attach(ws);
     console.log(`[ws] connection open (conv ${conv})`);
 
     ws.on("message", (data) => {
@@ -75,9 +75,9 @@ async function handleEnvelope(c: Conversation, ws: WebSocket, raw: string) {
 
   if (parsed.kind === "pi") {
     // Verbatim pump: client → pi stdin (queued if the child is mid-spawn).
-    c.sendPi(ws, parsed.payload);
+    c.sendPi(parsed.payload);
     return;
   }
 
-  await c.handleCtl(parsed.payload, ws);
+  await c.handleCtl(parsed.payload);
 }
