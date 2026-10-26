@@ -30,18 +30,11 @@ pnpm typecheck      # tsc --noEmit everywhere
 - App: http://localhost:5173 (dev); `pnpm --filter @haro/app build` → static bundle in `app/dist/` for dynames.
 - Server: binds `127.0.0.1:8787` (config via `server/.env.example`).
 
-## Deploy (tailscale serve, both hosts)
+## Deploy
 
-```sh
-# dynames — static SPA only (no content ever transits this host)
-tailscale serve --bg https+insecure://127.0.0.1:$(static-file-port)
-
-# haro — chat service (WS-capable proxy, TLS via ts.net cert)
-HARO_PI_BIN=pi pnpm --filter @haro/server start &
-tailscale serve --bg http://127.0.0.1:8787
-```
-
-Then set the SPA's first connection URL to `wss://haro.<tailnet>.ts.net/ws`.
+See [DEPLOY.md](DEPLOY.md): Dockerfile + compose for the SPA (dynames),
+native systemd unit for the chat service (haro), both behind
+`tailscale serve`.
 
 ## Status
 

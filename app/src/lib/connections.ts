@@ -17,10 +17,15 @@ import { uuid } from "@haro/shared";
 
 const KEY = "haro-chat:connections";
 
-/** First server — haro on the tailnet (hardcoded seed for v0.1, PRD §4). */
+/** First server — haro on the tailnet (hardcoded seed for v0.1, PRD §4).
+ *  Set VITE_DEFAULT_WS_URL at build time (Dockerfile ARG / DEPLOY.md) to bake
+ *  the real URL into the static bundle; per-user connections UI is v0.3. */
+const DEFAULT_WS_URL =
+  import.meta.env.VITE_DEFAULT_WS_URL || "wss://haro.<tailnet>.ts.net/ws";
+
 export const DEFAULT_CONNECTION: Omit<Connection, "id" | "dateAdded"> = {
   name: "haro",
-  url: "wss://haro.<tailnet>.ts.net/ws",
+  url: DEFAULT_WS_URL,
   lastConvId: null,
   prefs: {},
 };

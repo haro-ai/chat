@@ -1,0 +1,17 @@
+services:
+  # Static SPA (dynames role, ARCHITECTURE.md §1). Behind `tailscale serve`
+  # on the same host — bind loopback only, the tailnet is the exposure.
+  # Deploy flow + haro (chat service) instructions: DEPLOY.md
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+      args:
+        # Baked into the SPA bundle at build time — the seeded connection
+        # ("haro") points here. Per-user connections UI is v0.3 (PRD §4).
+        VITE_DEFAULT_WS_URL: ${VITE_DEFAULT_WS_URL:-wss://haro.<tailnet>.ts.net/ws}
+    image: haro-chat-app
+    ports:
+      # tailscale serve fronts 127.0.0.1:8080 → https://<host>.<tailnet>.ts.net
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:80"
+    restart: unless-stopped

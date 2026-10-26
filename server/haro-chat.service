@@ -1,0 +1,39 @@
+# haro chat service — systemd unit template (PRD Q5).
+#
+# Install (as root, paths adjusted for the pi user):
+#   sudo cp server/haro-chat.service /etc/systemd/system/haro-chat.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now haro-chat
+#
+# Then publish on the tailnet (TLS via ts.net cert):
+#   sudo tailscale serve --bg http://127.0.0.1:8787
+#
+# Native, not Docker: pi children spawned by this service must inherit
+# haro's agent environment (~/.pi, extensions, skills, credentials) —
+# a container would hide it from them (ARCHITECTURE.md §5).
+
+[Unit]
+Description=haro chat service (WS per conversation -> pi --mode rpc)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# <<< adjust: the pi user that owns haro's pi setup
+User=haro
+# <<< adjust: where the repo was cloned
+WorkingDirectory=/home/haro/Code/haro-chat
+# <<< adjust: include node/pnpm on PATH if installed via mise/homebrew
+#Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/haro/.local/share/mise/shims"
+ExecStart=/home/haro/Code/haro-chat/server/run.sh
+# Runtime config (port, scratch root, idle) — cp server/.env.example server/.env
+EnvironmentFile=-/home/haro/Code/haro-chat/server/.env
+Restart=on-failure
+RestartSec=2
+
+# Scratch lives in $TMPDIR (server/src/config.ts): private /tmp namespace,
+# cleaned by the idle sweep — nothing durable ever lands on haro (R5).
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
