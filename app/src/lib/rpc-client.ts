@@ -57,13 +57,18 @@ export class RpcClient {
     this.ws = ws;
 
     ws.onopen = () => {
-      this.setStatus("open");
+      // hello MUST go out before any queued/sync pi records: the server spawns
+      // the pi child on the first record it sees, and only hello carries the
+      // sessionPath — otherwise resumed conversations spawn a fresh session
+      // and their history is lost (reproduce: open a past conversation and
+      // watch the WS trace — pi, pi, hello = wrong; hello, pi, pi = right).
       this.sendCtl({
         ctl: "hello",
         clientId: this.clientId,
         sessionPath: this.opts.sessionPath,
       });
-      // flush outbox in order
+      this.setStatus("open");
+      // flush outbox in order (sync-on-open requests follow hello)
       for (const env of this.outbox.splice(0)) {
         ws.send(JSON.stringify(env));
       }

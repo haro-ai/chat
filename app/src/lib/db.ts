@@ -34,10 +34,13 @@ export class HaroChatDB extends Dexie {
 
   constructor() {
     super("haro-chat");
-    // v2: server-authoritative cache. The old client-owned `sessions` store
-    // (Model B) is dropped — the cache is disposable and rebuilt on open.
-    this.version(2).stores({
-      conversations: "++key, connId, updatedAt, sessionPath",
+    // v3: server-authoritative cache (v2 dropped the old client-owned
+    // `sessions` store) + `convId` index — setConversationMeta and
+    // deleteConversation look rows up with .where("convId"), which throws
+    // SchemaError unless convId is indexed. The cache is disposable and is
+    // rebuilt on open, so the upgrade carries no data migration.
+    this.version(3).stores({
+      conversations: "++key, connId, convId, updatedAt, sessionPath",
       messages: "++key, [convId+seq], convId",
     });
   }
@@ -122,8 +125,12 @@ export async function replaceMessages(
   await db.transaction("rw", db.messages, async () => {
     await db.messages.where("convId").equals(convId).delete();
     if (msgs.length > 0) {
+      // Pick fields explicitly: callers pass bubbles that may carry a display
+      // `key` (e.g. ChatMessage.key) — spreading it would feed a string into
+      // the `++key` auto-increment store and fail bulkAdd (ConstraintError),
+      // aborting the whole sync.
       await db.messages.bulkAdd(
-        msgs.map((m, seq) => ({ convId, seq, ts: Date.now(), ...m })),
+        msgs.map((m, seq) => ({ convId, seq, ts: Date.now(), role: m.role, text: m.text })),
       );
     }
   });

@@ -16,6 +16,10 @@ export class Conversation {
   lastActivity = Date.now();
   /** Session file to resume on the next child spawn (from ctl hello). */
   private sessionPath: string | null = null;
+  /** hello received? Pi records before it must not trigger the spawn. */
+  private helloSeen = false;
+  /** Fallback spawn timer if hello never arrives (compat with old clients). */
+  private helloFallback: NodeJS.Timeout | null = null;
 
   private idleTimer: NodeJS.Timeout | null = null;
   private outSeq = 0;
@@ -55,6 +59,11 @@ export class Conversation {
       case "hello": {
         const { sessionPath } = payload as { sessionPath?: string | null };
         this.sessionPath = typeof sessionPath === "string" && sessionPath ? sessionPath : null;
+        this.helloSeen = true;
+        if (this.helloFallback) {
+          clearTimeout(this.helloFallback);
+          this.helloFallback = null;
+        }
         await this.ensureChild();
         break;
       }
@@ -86,8 +95,22 @@ export class Conversation {
     }
   }
 
-  /** Client → pi. Queued if the child isn't running yet (spawn is async). */
+  /** Client → pi. Queued if the child isn't running yet (spawn is async).
+   *  Records that arrive before hello are held: spawning on them would bind
+   *  the child before sessionPath lands and resumed sessions would start
+   *  fresh. A short fallback timer covers clients that never say hello. */
   sendPi(payload: unknown): void {
+    if (!this.helloSeen && !this.child.running) {
+      this.pending.push(payload);
+      if (!this.helloFallback) {
+        this.helloFallback = setTimeout(() => {
+          this.helloFallback = null;
+          this.helloSeen = true;
+          void this.ensureChild();
+        }, 2_000);
+      }
+      return;
+    }
     if (!this.child.send(payload)) {
       this.pending.push(payload);
       void this.ensureChild();
@@ -122,6 +145,8 @@ export class Conversation {
   async dispose(): Promise<void> {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    if (this.helloFallback) clearTimeout(this.helloFallback);
+    this.helloFallback = null;
     // The session file lives in pi's store (Model A) — stopping the child
     // ends the conversation's residency; nothing else to clean up.
     this.child.stop();

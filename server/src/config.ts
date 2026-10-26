@@ -30,19 +30,27 @@ function num(name: string, fallback: number): number {
   return v ? Number(v) : fallback;
 }
 
+/** Env vars set to "" (e.g. `HARO_CWD=` in a copied .env) must fall back to
+ *  their default — `??` doesn't catch the empty string, which previously made
+ *  sessionsDir="" (readdir fails → empty session listing) and cwd="".
+ *  (children spawned in the server package dir instead of the home dir). */
+function str(name: string, fallback: string): string {
+  const v = process.env[name];
+  return v && v.trim() ? v : fallback;
+}
+
 export function loadConfig(): Config {
   return {
-    host: process.env.HARO_HOST ?? "127.0.0.1",
+    host: str("HARO_HOST", "127.0.0.1"),
     port: num("HARO_PORT", 8787),
-    piBin: process.env.HARO_PI_BIN ?? "pi",
-    cwd: process.env.HARO_CWD ?? os.homedir(),
+    piBin: str("HARO_PI_BIN", "pi"),
+    cwd: str("HARO_CWD", os.homedir()),
     sessionsDir:
-      process.env.HARO_SESSIONS_DIR ??
-      path.join(os.homedir(), ".pi", "agent", "sessions"),
+      str("HARO_SESSIONS_DIR", path.join(os.homedir(), ".pi", "agent", "sessions")),
     // --approve: pi children are non-interactive; trust the working folder's
     // project-local files rather than deadlock on a TUI-only prompt. The cwd
     // is the user's own home dir on a tailnet-only box they own.
-    piArgs: process.env.HARO_PI_ARGS?.split(" ").filter(Boolean) ?? ["--approve"],
+    piArgs: str("HARO_PI_ARGS", "--approve").split(" ").filter(Boolean),
     idleTimeoutMs: num("HARO_IDLE_TIMEOUT_MS", 10 * 60_000),
     maxChildren: num("HARO_MAX_CHILDREN", 4),
   };

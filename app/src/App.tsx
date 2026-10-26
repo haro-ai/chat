@@ -35,11 +35,16 @@ export default function App() {
   const [status, setStatus] = useState<ConnStatus>("idle");
   /** past sessions on the agent host (Model A listing), null = not fetched */
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null);
+  /** Set when "Resume a past session…" was tapped with no conversation open:
+   *  a conversation is created and the listing is requested once it connects. */
+  const wantSessionsRef = useRef(false);
 
   const rpcRef = useRef<RpcClient | null>(null);
   const activeRef = useRef<ConversationRow | null>(null);
   const streamingRef = useRef("");
   const messagesRef = useRef<MessageRow[]>([]);
+  /** Bumper for cached-message loads: only the latest switch may paint. */
+  const loadSeqRef = useRef(0);
 
   activeRef.current = active;
   messagesRef.current = messages;
@@ -69,7 +74,13 @@ export default function App() {
         ((msgsRes.data as { messages?: unknown[] })?.messages ?? []) as never[],
       );
       await replaceMessages(conv.convId, bubbles);
-      setMessages(await listMessages(conv.convId));
+      const fresh = await listMessages(conv.convId);
+      // A sync may outlive its conversation (slow fetch while the user
+      // switched): DB writes above still target the right row, but painting
+      // must only happen if this conversation is still on screen — otherwise
+      // the new chat shows the previous chat's messages.
+      if (activeRef.current?.convId !== conv.convId) return;
+      setMessages(fresh);
       setOptimistic(null);
       // Adopt the session identity pi created (new conversations only —
       // resumed ones already have their path).
@@ -102,18 +113,33 @@ export default function App() {
   useEffect(() => {
     if (!connection || !active) return;
 
+    const convId = active.convId;
     const rpc = new RpcClient({
       baseUrl: connection.url,
-      convId: active.convId,
+      convId,
       sessionPath: active.sessionPath,
-      onRecord: (record) => void handleRecord(record),
+      onRecord: (record) => {
+        // Drop late records from a superseded client (its conversation was
+        // switched away from): they would drive handleRecord against the
+        // now-active conversation.
+        if (rpcRef.current !== rpc || activeRef.current?.convId !== convId) return;
+        void handleRecord(record, convId);
+      },
       onCtl: (ctl) => {
+        if (rpcRef.current !== rpc) return;
         if (ctl.ctl === "sessions") setSessions(ctl.sessions);
       },
       onStatus: (s) => {
+        if (rpcRef.current !== rpc) return;
         setStatus(s);
         // Sync-on-open: reconcile the cache with the server's session store.
-        if (s === "open") syncActive().catch(() => {});
+        if (s === "open") {
+          if (wantSessionsRef.current) {
+            wantSessionsRef.current = false;
+            rpc.sendCtl({ ctl: "list_sessions" });
+          }
+          syncActive().catch(() => {});
+        }
       },
     });
     rpcRef.current = rpc;
@@ -137,13 +163,22 @@ export default function App() {
   // Load the cached mirror when switching conversations.
   useEffect(() => {
     if (!active) {
+      loadSeqRef.current += 1;
       setMessages([]);
       return;
     }
-    void listMessages(active.convId).then(setMessages);
+    const convId = active.convId;
+    const seq = ++loadSeqRef.current;
+    void listMessages(convId).then((rows) => {
+      // Only the most recent switch may paint — a slow IndexedDB read for a
+      // previously-active conversation must not overwrite the current view.
+      if (seq === loadSeqRef.current && activeRef.current?.convId === convId) {
+        setMessages(rows);
+      }
+    });
   }, [active]);
 
-  async function handleRecord(record: unknown) {
+  async function handleRecord(record: unknown, convId: string) {
     const r = record as {
       type?: string;
       id?: string;
@@ -169,12 +204,15 @@ export default function App() {
       try {
         await syncActive();
       } catch {
-        if (text && activeRef.current) {
-          await replaceMessages(activeRef.current.convId, [
-            ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
-            { role: "assistant" as const, text },
-          ]);
-          setMessages(await listMessages(activeRef.current.convId));
+        if (text && activeRef.current?.convId === convId) {
+          const cur = activeRef.current;
+          if (cur) {
+            await replaceMessages(cur.convId, [
+              ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
+              { role: "assistant" as const, text },
+            ]);
+            setMessages(await listMessages(cur.convId));
+          }
         }
       }
       setStreaming("");
@@ -186,12 +224,15 @@ export default function App() {
       syncActive().catch(() => {});
       return;
     }
-    if (r?.type === "response" && r.success === false && activeRef.current) {
-      await replaceMessages(activeRef.current.convId, [
-        ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
-        { role: "system" as const, text: `Error: ${JSON.stringify(r.error ?? "command failed")}` },
-      ]);
-      setMessages(await listMessages(activeRef.current.convId));
+    if (r?.type === "response" && r.success === false && activeRef.current?.convId === convId) {
+      const cur = activeRef.current;
+      if (cur) {
+        await replaceMessages(cur.convId, [
+          ...messagesRef.current.map((m) => ({ role: m.role, text: m.text })),
+          { role: "system" as const, text: `Error: ${JSON.stringify(r.error ?? "command failed")}` },
+        ]);
+        setMessages(await listMessages(cur.convId));
+      }
     }
   }
 
@@ -228,7 +269,15 @@ export default function App() {
 
   function requestSessions() {
     setSessions(null); // loading
-    rpcRef.current?.sendCtl({ ctl: "list_sessions" });
+    if (rpcRef.current && status === "open") {
+      rpcRef.current.sendCtl({ ctl: "list_sessions" });
+      return;
+    }
+    // No conversation open → no WS exists yet. Create one; the listing is
+    // requested when it connects (see onStatus). Previously this was a
+    // silent no-op — the picker never appeared.
+    wantSessionsRef.current = true;
+    void newConversation();
   }
 
   async function send(text: string) {
@@ -263,7 +312,10 @@ export default function App() {
         sessions={sessions}
         onBrowseSessions={requestSessions}
         onSelectSession={(info) => void openSession(info)}
-        onCloseSessions={() => setSessions(null)}
+        onCloseSessions={() => {
+          wantSessionsRef.current = false;
+          setSessions(null);
+        }}
       />
       <div className="flex-1">
         <ChatView
